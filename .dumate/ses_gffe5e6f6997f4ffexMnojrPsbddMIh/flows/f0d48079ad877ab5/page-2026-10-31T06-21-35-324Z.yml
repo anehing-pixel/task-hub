@@ -1,0 +1,4 @@
+- generic [ref=e1]:
+  - heading "欢迎回来" [level=2]
+  - button "一键进入系统"
+  - paragraph: 测试环境：点击即可登录

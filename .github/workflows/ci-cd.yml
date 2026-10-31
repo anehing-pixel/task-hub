@@ -1,0 +1,100 @@
+# CI/CD：Vue 3 + Vite 8（Rolldown）静态站点 → GitHub Pages
+#
+#   CI：每次 push 到 main、以及所有指向 main 的 PR，都执行「装依赖 → 构建 → 产出 dist 制品」
+#   CD：仅当 main 分支被 push（或手动触发）时，把 dist/ 发布到 GitHub Pages
+#
+# 首次使用前需在仓库里做一次性设置：
+#   Settings → Pages → Build and deployment → Source 选择 "GitHub Actions"
+# （选这个之后 Pages 由本 workflow 发布，不需要再建 gh-pages 分支）
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一 ref 的构建/部署串行执行；新提交进来时取消尚未完成的旧任务
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------- CI：构建校验 + 产出制品 ----------
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          # 与本地一致：Node 22（Vite 8 要求 ^20.19 或 >=22.12）
+          node-version: 22
+          # 依据 package-lock.json 命中 npm 缓存，省去每次重装依赖的时间
+          cache: npm
+
+      - name: Install dependencies
+        # 用 ci 而非 install：严格按 lockfile 还原，且 lockfile 与 package.json 不一致时直接失败
+        run: npm ci
+
+      # 项目当前没有 lint / 测试脚本。将来补上后在此处插入即可，例如：
+      #   - name: Lint
+      #     run: npm run lint
+      #   - name: Unit tests
+      #     run: npm run test
+
+      - name: Build
+        env:
+          # 项目页 URL 形如 https://<user>.github.io/<repo>/，base 必须指到该子路径，
+          # 否则产物里的 /assets/* 绝对路径会 404。
+          # 注意：如果仓库名是 <user>.github.io（用户主页），或绑定了自定义域名，
+          # 应把下面一行改成 VITE_BASE: /
+          VITE_BASE: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - name: Add SPA fallback (404.html)
+        # history 模式下直接访问 /<repo>/login 会被 Pages 判为 404 并返回 404.html；
+        # 把构建产物 index.html 复制一份成 404.html，SPA 就能在该 URL 上正常启动，
+        # 由 vue-router 按 BASE_URL 解析出真实路由
+        run: cp dist/index.html dist/404.html
+
+      - name: Upload dist artifact
+        # 供人工下载检查；与 Pages 发布无关
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist
+          retention-days: 7
+
+      - name: Upload Pages artifact
+        # PR 不发布，只有要进 main 时才打包 Pages 制品
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+
+  # ---------- CD：发布到 GitHub Pages ----------
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    # PR 只跑 CI 不部署；手动触发时 github.ref 为分支引用，同样按 main 判断
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write      # 写 Pages 站点
+      id-token: write   # deploy-pages 通过 OIDC 校验部署来源，缺这个会失败
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5
